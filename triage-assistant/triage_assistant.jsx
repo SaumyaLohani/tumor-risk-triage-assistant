@@ -1,8 +1,5 @@
 import { useState, useMemo, useRef } from "react";
 
-// ---- Trained model, exported from a real scikit-learn LogisticRegression
-// trained on the Wisconsin Breast Cancer Diagnostic dataset. See the
-// accompanying train_model.py for how these numbers were produced.
 const MODEL = {
   featureNames: [
     "mean radius", "mean texture", "mean perimeter",
