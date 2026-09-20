@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo } from "react";
 
 // ---- Trained model, exported from a real scikit-learn LogisticRegression
 // trained on the Wisconsin Breast Cancer Diagnostic dataset. See the
@@ -58,6 +58,44 @@ function riskBand(pMalignant) {
   return { label: "High", color: "#A8412F" };
 }
 
+// ---- Plain-language explanation, generated directly from the model's own
+// coefficients. No external API call: this keeps the demo working on any
+// deployment target and doubles as a demonstration of why an interpretable
+// model (logistic regression) was chosen over a black box.
+function explainFeature(key, value) {
+  const idx = MODEL.featureNames.indexOf(key);
+  const scaledDiff = (value - MODEL.mean[idx]) / MODEL.scale[idx];
+  const contribution = MODEL.coef[idx] * scaledDiff; // negative -> pushes toward malignant
+  return { key, scaledDiff, contribution };
+}
+
+function buildExplanation(values, pMalignant, band) {
+  const contributions = MODEL.featureNames.map((key) => explainFeature(key, values[key]));
+  const towardMalignant = [...contributions].sort((a, b) => a.contribution - b.contribution).slice(0, 2);
+  const towardBenign = [...contributions].sort((a, b) => b.contribution - a.contribution).slice(0, 2);
+
+  const label = (key) => MODEL.labels.find((f) => f.key === key)?.label || key;
+  const direction = (d) => (d > 0.15 ? "higher than typical" : d < -0.15 ? "lower than typical" : "close to typical");
+
+  const riskDrivers = towardMalignant
+    .filter((f) => f.contribution < -0.05)
+    .map((f) => `${label(f.key)} (${direction(f.scaledDiff)})`);
+  const reassuring = towardBenign
+    .filter((f) => f.contribution > 0.05)
+    .map((f) => `${label(f.key)} (${direction(f.scaledDiff)})`);
+
+  let body;
+  if (band.label === "Low") {
+    body = `This ${(pMalignant * 100).toFixed(1)}% score is low risk. Most measurements sit close to typical benign ranges${reassuring.length ? `, particularly ${reassuring.join(" and ")}` : ""}.`;
+  } else if (band.label === "High") {
+    body = `This ${(pMalignant * 100).toFixed(1)}% score is high risk. The strongest signals pushing it up are ${riskDrivers.join(" and ") || "several measurements running above typical ranges"}.`;
+  } else {
+    body = `This ${(pMalignant * 100).toFixed(1)}% score sits in an elevated-but-uncertain range.${riskDrivers.length ? ` ${riskDrivers.join(" and ")} push it toward malignant,` : ""}${reassuring.length ? ` while ${reassuring.join(" and ")} pull it back toward benign.` : ""}`;
+  }
+
+  return `${body} This explanation is generated directly from the trained model's own coefficients \u2014 one advantage of an interpretable model like logistic regression over a black box. Reminder: this is a portfolio demo on a public research dataset, not a medical device or diagnosis.`;
+}
+
 const INK = "#16232B";
 const INK_SOFT = "#4B5A61";
 const BG = "#F2F1EC";
@@ -72,9 +110,6 @@ export default function TriageAssistant() {
     return v;
   });
   const [explanation, setExplanation] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const requestId = useRef(0);
 
   const { pMalignant, pBenign } = useMemo(() => predict(values), [values]);
   const band = riskBand(pMalignant);
@@ -82,49 +117,10 @@ export default function TriageAssistant() {
   function handleSlider(key, val) {
     setValues((prev) => ({ ...prev, [key]: Number(val) }));
     setExplanation("");
-    setError("");
   }
 
-  async function getExplanation() {
-    const myId = ++requestId.current;
-    setLoading(true);
-    setError("");
-    setExplanation("");
-    try {
-      const summary = MODEL.labels
-        .map((f) => `${f.label}: ${values[f.key].toFixed(3)}${f.unit}`)
-        .join(", ");
-      const prompt = `You are assisting inside an educational, non-diagnostic demo app that a product manager built to show ML + LLM skills. A logistic regression model trained on the Wisconsin Breast Cancer Diagnostic dataset just scored a set of hypothetical tumor measurements.
-
-Measurements: ${summary}
-Model output: ${(pMalignant * 100).toFixed(1)}% probability malignant, ${(pBenign * 100).toFixed(1)}% probability benign.
-
-Write a short (3-4 sentence) plain-language explanation of what this output means and which measurements likely pushed the score in that direction, written for someone without a clinical background. End with one sentence reminding the reader this is a portfolio demo on a public research dataset, not a medical device or diagnosis.`;
-
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 400,
-          messages: [{ role: "user", content: prompt }],
-        }),
-      });
-      const data = await response.json();
-      if (myId !== requestId.current) return;
-      const text = (data.content || [])
-        .map((b) => (b.type === "text" ? b.text : ""))
-        .join("\n")
-        .trim();
-      if (!text) throw new Error("empty response");
-      setExplanation(text);
-    } catch (e) {
-      if (myId === requestId.current) {
-        setError("Couldn't generate an explanation right now. Try again in a moment.");
-      }
-    } finally {
-      if (myId === requestId.current) setLoading(false);
-    }
+  function handleExplain() {
+    setExplanation(buildExplanation(values, pMalignant, band));
   }
 
   return (
@@ -138,9 +134,9 @@ Write a short (3-4 sentence) plain-language explanation of what this output mean
             Tumor risk triage assistant
           </h1>
           <p style={{ color: INK_SOFT, fontFamily: "ui-sans-serif, system-ui" }} className="text-sm max-w-xl leading-relaxed">
-            A logistic regression model trained on the Wisconsin Breast Cancer Diagnostic dataset,
-            paired with an LLM that translates the score into plain language. Adjust the
-            measurements to see the model respond in real time.
+            A logistic regression model trained on the Wisconsin Breast Cancer Diagnostic dataset.
+            Adjust the measurements to see the model respond in real time, then ask it to explain
+            its own reasoning.
           </p>
         </header>
 
@@ -217,20 +213,18 @@ Write a short (3-4 sentence) plain-language explanation of what this output mean
                 Plain-language explanation
               </h2>
               <button
-                onClick={getExplanation}
-                disabled={loading}
-                style={{ background: loading ? LINE : ACCENT, color: loading ? INK_SOFT : "#fff", fontFamily: "ui-sans-serif, system-ui" }}
+                onClick={handleExplain}
+                style={{ background: ACCENT, color: "#fff", fontFamily: "ui-sans-serif, system-ui" }}
                 className="text-sm px-4 py-2 mb-3 w-full transition-colors"
               >
-                {loading ? "Thinking\u2026" : "Explain this result"}
+                Explain this result
               </button>
-              {error && <p className="text-xs" style={{ color: "#A8412F", fontFamily: "ui-sans-serif, system-ui" }}>{error}</p>}
               {explanation && (
                 <p style={{ fontFamily: "ui-sans-serif, system-ui", color: INK, lineHeight: 1.6 }} className="text-sm whitespace-pre-wrap">
                   {explanation}
                 </p>
               )}
-              {!explanation && !loading && !error && (
+              {!explanation && (
                 <p style={{ fontFamily: "ui-sans-serif, system-ui", color: INK_SOFT }} className="text-sm">
                   Adjust the measurements, then click above to have the model's reasoning
                   translated into plain language.
